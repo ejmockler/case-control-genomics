@@ -70,7 +70,7 @@ class Config(BaseModel):
 
 config = Config(
     vcf=VCFConfig(
-        path="../adhoc analysis/whole_genome_merged_no_vqsr_no_annotation_KarenRegions_MICROGLIAL_ANNOTATED.sorted.vcf.gz",
+        path="../adhoc analysis/mock.vcf.gz",
         binarize=False,
         zygosity=True,
         min_allele_frequency=0.005,
@@ -82,14 +82,14 @@ config = Config(
         path="../adhoc analysis/gencode.v46.chr_patch_hapl_scaff.annotation.gtf.gz",
         filter="(ht.transcript_type == 'protein_coding') | (ht.transcript_type == 'protein_coding_LoF')",
     ),
-    gmt=GMTConfig(
-        path="../adhoc analysis/strict_microglial_associated_genes.gmt",
-        filter="",
-    ),
+    # gmt=GMTConfig(
+    #     path="../adhoc analysis/strict_microglial_associated_genes.gmt",
+    #     filter="",
+    # ),
     tracking=TrackingConfig(
         name="Variants on microglial-associated genes, MAF>=0.5% (zygosity-binned)\nTrained on: AnswerALS cases & non-neurological controls (Caucasian)",
         entity="ejmockler",
-        experiment_name="microglial-variants-autoCI-0.005MAF",
+        experiment_name="dbg",
         plot_all_sample_importances=False,  
         tracking_uri="http://127.0.0.1:5001/",
     ),
@@ -169,9 +169,9 @@ config = Config(
         ]
     ),
     sampling=SamplingConfig(
-        outer_bootstrap_iterations=10,
-        resume_outer_iteration_from=4,
-        bootstrap_iterations=100,
+        outer_bootstrap_iterations=20,
+        resume_outer_iteration_from=0,
+        bootstrap_iterations=50,
         crossval_folds=10,
         feature_credible_interval=0.5,
         test_size=0.3,

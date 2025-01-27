@@ -3,6 +3,7 @@ import logging
 from typing import Dict, Optional, List
 from functools import partial
 import re
+import copy
 
 import hail as hl
 import matplotlib.pyplot as plt
@@ -483,7 +484,7 @@ def process_iteration(
 
 def bootstrap_models(
     sample_processor: SampleProcessor,
-    parquet_path: str,  # Changed parameter
+    parquet_path: str,
     samplingConfig: SamplingConfig,
     trackingConfig: TrackingConfig,
     stack: Dict,
@@ -500,38 +501,44 @@ def bootstrap_models(
 
     mlflow.set_experiment(experiment_id=experiment_id)
 
-    # Read total variant count from Parquet metadata
-    total_variants = len(pd.read_parquet(parquet_path).columns) - 1  # Subtract sample_id column
-
-    train_test_sample_ids = sample_processor.draw_train_test_split(
+    # Initial split for feature selection
+    feature_selection_split = sample_processor.draw_train_test_split(
         test_size=samplingConfig.test_size,
         random_state=random_state * outer_iteration + 1,
     )
+    
+    feature_selection_samples = list(feature_selection_split['train']['samples'].values())
+    validation_samples = list(feature_selection_split['test']['samples'].values())
 
-    train_samples = list(train_test_sample_ids['train']['samples'].values())
-    validation_samples = list(train_test_sample_ids['test']['samples'].values())
-
-    # Feature Selection Step
+    # Feature Selection using feature selection samples
     feature_selection_result = parallel_feature_selection(
         parquet_path=parquet_path,
         sample_processor=sample_processor,
         samplingConfig=samplingConfig,
-        train_samples=train_samples,
-        num_iterations=10,  # Number of parallel feature selection iterations
-        total_variants=total_variants,
+        train_samples=feature_selection_samples,
+        num_iterations=10,
+        total_variants=len(pd.read_parquet(parquet_path).columns) - 1,
         random_state=random_state,
         trackingConfig=trackingConfig,
         outer_iteration=outer_iteration
     )
 
-    # Prepare arguments for parallel processing of bootstrap iterations
-    iterations = range(samplingConfig.bootstrap_iterations)
+    # Copy the sample processor and reset usage tracking
+    bootstrap_processor = copy.deepcopy(sample_processor)
+    bootstrap_processor.sample_usage = {
+        sample_id: {
+            'train_count': 0,
+            'test_count': 0
+        } for sample_id in sample_processor.id_mapping.keys()
+    }
+
+    # Bootstrap iterations use validation_samples pool
     tasks = [
         process_iteration.remote(
             i,
             parquet_path,
             validation_samples,
-            sample_processor,
+            bootstrap_processor,
             samplingConfig,
             trackingConfig,
             stack,
@@ -539,15 +546,11 @@ def bootstrap_models(
             random_state,
             outer_iteration=outer_iteration
         )
-        for i in iterations
+        for i in range(samplingConfig.bootstrap_iterations)
     ]
 
-    # Execute tasks in parallel using Ray
     ray.get(tasks)
-
     logger.info("Completed bootstrapping of models.")
-
-    return
 
 def parallel_feature_selection(
     parquet_path: str,

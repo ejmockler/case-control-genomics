@@ -149,6 +149,7 @@ shapExplanations*
 projects/
 mlruns/
 mlartifacts/
+adhoc analysis/
 
 # neptune.ai
 .neptune

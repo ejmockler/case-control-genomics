@@ -1091,32 +1091,53 @@ class OuterBootstrapSummarizer:
                 elif col.endswith(std_suffix):
                     base_col = col[:-4]  # Remove _std suffix
                     if col in sample_data.columns:
-                        # Use RMS for existing std columns
-                        record[col] = np.sqrt(sample_data[col].pow(2).mean())
+                        # Ensure numeric type before calculating RMS
+                        try:
+                            numeric_values = pd.to_numeric(sample_data[col], errors='coerce')
+                            record[col] = np.sqrt((numeric_values ** 2).mean())
+                        except (TypeError, ValueError):
+                            record[col] = np.nan
                     else:
                         # For model-specific metrics, find the relevant columns
                         base_cols = [c for c in sample_data.columns if c.startswith(f"{base_col}_") and not c.endswith(std_suffix)]
                         if base_cols:
-                            values = sample_data[base_cols].mean(axis=1)
-                            if len(values) > 1:
-                                record[col] = values.std(ddof=1)
-                            else:
+                            try:
+                                values = pd.to_numeric(sample_data[base_cols].mean(axis=1), errors='coerce')
+                                if len(values.dropna()) > 1:
+                                    record[col] = values.std(ddof=1)
+                                else:
+                                    record[col] = np.nan
+                            except (TypeError, ValueError):
                                 record[col] = np.nan
-                        elif base_col in sample_data.columns and len(sample_data[base_col]) > 1:
-                            # Direct metric case
-                            record[col] = sample_data[base_col].std(ddof=1)
+                        elif base_col in sample_data.columns:
+                            try:
+                                values = pd.to_numeric(sample_data[base_col], errors='coerce')
+                                if len(values.dropna()) > 1:
+                                    record[col] = values.std(ddof=1)
+                                else:
+                                    record[col] = np.nan
+                            except (TypeError, ValueError):
+                                record[col] = np.nan
                         else:
                             record[col] = np.nan
                 else:
                     # Handle means for both direct and model-specific metrics
                     if col in sample_data.columns:
-                        record[col] = sample_data[col].mean()
+                        try:
+                            values = pd.to_numeric(sample_data[col], errors='coerce')
+                            record[col] = values.mean()
+                        except (TypeError, ValueError):
+                            record[col] = sample_data[col].iloc[0]
                     else:
                         # For overall metrics with multiple models
                         model_cols = [c for c in sample_data.columns if c.startswith(f"{col}_") and not c.endswith(std_suffix)]
                         if model_cols:
-                            record[col] = sample_data[model_cols].mean(axis=1).mean()
-            
+                            try:
+                                values = pd.to_numeric(sample_data[model_cols].mean(axis=1), errors='coerce')
+                                record[col] = values.mean()
+                            except (TypeError, ValueError):
+                                record[col] = np.nan
+        
             aggregated_metrics.append(record)
         
         return pd.DataFrame(aggregated_metrics, columns=ordered_columns)

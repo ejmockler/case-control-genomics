@@ -4,6 +4,7 @@ from functools import cached_property
 import logging
 from sklearn.model_selection import StratifiedShuffleSplit
 import numpy as np
+import ray
 
 from config import Config, TableMetadata
 from data.dataloader import create_loader
@@ -17,7 +18,12 @@ class SampleProcessor:
         self.holdout_data = self._load_and_process_tables(self.config.holdout_tables.tables)
         self.id_mapping = self._create_id_mapping()
 
-        self.sample_draw_counts: Dict[str, int] = {sample_id: 0 for sample_id in self.id_mapping.keys()}
+        self.sample_usage = {
+            sample_id: {
+                'train_count': 0,
+                'test_count': 0
+            } for sample_id in self.id_mapping.keys()
+        }
 
     def _create_id_mapping(self) -> Dict[str, str]:
         mapping = {}
@@ -191,19 +197,27 @@ class SampleProcessor:
         Args:
             test_size (float): Proportion of the dataset to include in the test split.
             random_state (int): Random seed for reproducibility.
+            subset (List[str]): Optional subset of sample IDs to draw from.
 
         Returns:
             Dict[str, Dict[str, str]]: A dictionary containing 'train' and 'test' sample IDs and their table mappings.
         """
+        # Initialize lists to collect strata and labels
+        strata_list = []
+        labels = []
+        sample_ids = []
+
         # Combine case and control IDs
         combined_ids = self.overlapping_case_ids['crossval'] + self.overlapping_control_ids['crossval']
         if subset is not None:
             combined_ids = [id for id in combined_ids if id in subset]
 
-        # Initialize lists to collect strata and labels
-        strata_list = []
-        labels = []
-        sample_ids = []
+        # Calculate weights based on usage
+        weights = []
+        for id_ in combined_ids:
+            count = self.sample_usage[id_]['train_count'] + self.sample_usage[id_]['test_count']
+            weights.append(1.0 / (count + 1.0))
+        weights = np.array(weights) / sum(weights)
 
         # Iterate over each table to collect strata information
         for table_name, table_info in self.crossval_data.items():
@@ -230,32 +244,66 @@ class SampleProcessor:
 
             # Process strata
             df_table = self._process_strata(df_table, strata_columns)
-
-            # Assign 'id' from the index
-            df_table = df_table.assign(id=df_table.index)
-
-            # Collect strata and labels
+            
+            # Collect strata, labels, and IDs
+            curr_ids = df_table.index.tolist()
             strata_list.extend(df_table['stratum'])
             labels.extend([1 if table_info['metadata'].label == 'case' else 0] * len(df_table))
-            sample_ids.extend(df_table['id'])
+            sample_ids.extend(curr_ids)
+            
 
         if not strata_list:
             raise ValueError("No strata information available across crossval tables for sampling.")
+       
+        # Collect all weights in same order as sample_ids
+        all_weights = []
+        for id_ in sample_ids:
+            idx = combined_ids.index(id_)
+            all_weights.append(weights[idx])
+        all_weights = np.array(all_weights)
 
-        # Initialize StratifiedShuffleSplit
-        splitter = StratifiedShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+        # Group samples by strata for weighted sampling
+        strata_groups = {}
+        for idx, (id_, stratum) in enumerate(zip(sample_ids, strata_list)):
+            if stratum not in strata_groups:
+                strata_groups[stratum] = []
+            strata_groups[stratum].append((idx, all_weights[idx]))
 
-        # Generate train and test indices
-        for train_idx, test_idx in splitter.split(sample_ids, strata_list):
-            train_sample_ids = [sample_ids[i] for i in train_idx]
-            test_sample_ids = [sample_ids[i] for i in test_idx]
-            break  # Only one split
+        # Sample from each stratum proportionally
+        train_idx, test_idx = [], []
+        for stratum, samples in strata_groups.items():
+            indices, weights = zip(*samples)  # Unpack the tuples of (idx, weight)
+            indices = list(indices)  # Convert to list for easier manipulation
+            weights = np.array(weights) / sum(weights)  # Normalize weights
+            
+            # Calculate number of test samples for this stratum
+            n_test = min(  # Take minimum of:
+                max(2, int(len(indices) * test_size)),  # Desired test size
+                len(indices) - 1  # Leave at least 1 for train
+            )
+            
+            # Sample test indices with weights
+            test = np.random.choice(
+                indices, 
+                size=n_test, 
+                replace=False,
+                p=weights
+            )
+            # Remaining indices go to train
+            train = list(set(indices) - set(test))
+            
+            train_idx.extend(train)
+            test_idx.extend(test)
+
+        # Get final sample IDs
+        train_sample_ids = [sample_ids[i] for i in train_idx]
+        test_sample_ids = [sample_ids[i] for i in test_idx]
 
         # Balance the training set
-        balanced_train_ids = self._balance_classes(train_sample_ids, 'crossval')
+        balanced_train_ids = self._balance_classes(train_sample_ids, 'crossval', 'train')
 
         # Balance the test set
-        balanced_test_ids = self._balance_classes(test_sample_ids, 'crossval')
+        balanced_test_ids = self._balance_classes(test_sample_ids, 'crossval', 'test')
 
         # Shuffle the balanced sample IDs
         np.random.seed(random_state)
@@ -296,7 +344,7 @@ class SampleProcessor:
             }
         }
 
-    def _balance_classes(self, sample_ids: List[str], dataset: str) -> List[str]:
+    def _balance_classes(self, sample_ids: List[str], dataset: str, split_type: str = 'train') -> List[str]:
         """
         Balances the classes by ensuring equal representation of cases and controls.
         Prefers samples that have been drawn less frequently to ensure uniform sampling.
@@ -304,6 +352,7 @@ class SampleProcessor:
         Args:
             sample_ids (List[str]): List of sample IDs to balance.
             dataset (str): The dataset type ('crossval' or 'holdout').
+            split_type (str): Whether these samples are for 'train' or 'test'
 
         Returns:
             List[str]: Balanced list of sample IDs.
@@ -311,19 +360,27 @@ class SampleProcessor:
         cases = [id_ for id_ in sample_ids if id_ in self.overlapping_case_ids[dataset]]
         controls = [id_ for id_ in sample_ids if id_ in self.overlapping_control_ids[dataset]]
 
-        # Sort cases and controls by their draw counts (ascending)
-        cases_sorted = sorted(cases, key=lambda x: self.sample_draw_counts.get(x, 0))
-        controls_sorted = sorted(controls, key=lambda x: self.sample_draw_counts.get(x, 0))
+        # Calculate weights inversely proportional to usage
+        def get_weights(samples):
+            counts = [self.sample_usage[x][f'{split_type}_count'] for x in samples]
+            # Add 1 to avoid division by zero and ensure non-zero probabilities
+            weights = 1.0 / (np.array(counts) + 1.0)
+            return weights / weights.sum()  # Normalize
 
-        min_count = min(len(cases_sorted), len(controls_sorted))
-        balanced_cases = cases_sorted[:min_count]
-        balanced_controls = controls_sorted[:min_count]
-        balanced_sample_ids = balanced_cases + balanced_controls
+        # Sample with weights
+        min_size = min(len(cases), len(controls))
+        if len(cases) > min_size:
+            case_weights = get_weights(cases)
+            cases = list(np.random.choice(cases, size=min_size, p=case_weights, replace=False))
+        if len(controls) > min_size:
+            control_weights = get_weights(controls)
+            controls = list(np.random.choice(controls, size=min_size, p=control_weights, replace=False))
 
-        # Update draw counts in bulk using a dictionary comprehension
-        self.sample_draw_counts.update({
-            sample_id: self.sample_draw_counts.get(sample_id, 0) + 1 
-            for sample_id in balanced_sample_ids})
+        balanced_sample_ids = cases + controls
+
+        # Update usage counts
+        for sample_id in balanced_sample_ids:
+            self.sample_usage[sample_id][f'{split_type}_count'] += 1
 
         return balanced_sample_ids
 
