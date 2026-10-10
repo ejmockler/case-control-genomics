@@ -50,19 +50,31 @@ class GenotypeProcessor:
 
     def _preprocess_and_filter(self, mt: hl.MatrixTable) -> hl.MatrixTable:
         """Applies all preprocessing steps and filters in a single pass."""
+        # Split multiallelic sites so that each alternate allele is a separate biallelic feature;
+        # otherwise genotypes carrying different alternate alleles collapse into one column
+        if self.config.split_multiallelic:
+            mt = hl.split_multi_hts(mt)
+
+        # Drop variants failing VCF filters (e.g. VQSR) before anything else is computed
+        if self.config.pass_only:
+            mt = mt.filter_rows(hl.is_missing(mt.filters) | (hl.len(mt.filters) == 0))
+
+        # Drop variants in difficult regions (segmental duplications, low-complexity sequence)
+        if self.config.exclude_regions_bed:
+            excluded = hl.import_bed(self.config.exclude_regions_bed, reference_genome='GRCh38', skip_invalid_intervals=True)
+            mt = mt.filter_rows(hl.is_missing(excluded[mt.locus]))
+
         # Annotate entries with processed genotype
         mt = mt.annotate_entries(GT_processed=self._get_processed_gt(mt.GT))
-        
+
         # Annotate rows with necessary statistics including variance
+        alt_af = hl.agg.mean(mt.GT.n_alt_alleles()) / 2
+        mt = mt.annotate_rows(alt_af=alt_af)
         mt = mt.annotate_rows(
-            maf=hl.if_else(
-                self.config.binarize,
-                hl.agg.mean(mt.GT_processed),        # Proportion of carriers
-                hl.agg.mean(mt.GT_processed) / 2     # Traditional allele frequency
-            ),
+            maf=hl.min(mt.alt_af, 1 - mt.alt_af),   # Minor allele frequency, independent of the genotype encoding
             stdev=hl.agg.stats(mt.GT_processed).stdev,
             has_missing=hl.agg.any(hl.is_missing(mt.GT_processed)),
-            variant_id=hl.str(mt.locus.contig) + ':' + hl.str(mt.locus.position)
+            variant_id=hl.str(mt.locus.contig) + ':' + hl.str(mt.locus.position) + ':' + mt.alleles[0] + ':' + mt.alleles[1]
         )
         
         # Collect stdev values for threshold detection
@@ -81,7 +93,7 @@ class GenotypeProcessor:
         
         # Apply row filters based on detected variance threshold and other criteria
         mt = mt.filter_rows(
-            (mt.maf > 0) & (mt.maf < 1) &                             # Remove invariant variants
+            (mt.maf > 0) &                                            # Remove invariant variants
             (mt.locus.contig.matches(self._get_contig_pattern())) &   # Filter biologically useful contigs
             hl.all(lambda a: hl.len(a) == 1, mt.alleles) &            # Filter to only include SNPs
             (mt.maf >= self.config.min_allele_frequency) &            # Apply MAF filter

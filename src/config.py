@@ -6,11 +6,18 @@ class VCFConfig(BaseModel):
     path: str
     binarize: bool = False
     zygosity: bool = True
+    # bounds on minor allele frequency (folded at 0.5, computed from allele dosage regardless of encoding)
     min_allele_frequency: float = 0.0025
-    max_allele_frequency: float = 1.0
+    max_allele_frequency: float = 0.5
     max_variants: Optional[int] = None
     min_variance: float = 0.01
     filter: str = ""
+    # split multiallelic sites so each alternate allele is its own feature
+    split_multiallelic: bool = True
+    # keep only variants whose VCF FILTER is PASS (or unset)
+    pass_only: bool = True
+    # BED of regions to exclude, e.g. segmental duplications & low-complexity regions
+    exclude_regions_bed: Optional[str] = None
 
 class GTFConfig(BaseModel):
     path: str
@@ -35,6 +42,8 @@ class TableMetadata(BaseModel):
     label: str
     id_column: str
     filter: str
+    # column identifying the individual; if set, only one sample per subject is kept
+    subject_column: Optional[str] = None
     # Change strata_columns to a mapping from standard strata to table-specific column names
     strata_mapping: Optional[Dict[str, str]] = None  # e.g., {"sex": "Sex Call", "age": "Age"}
 
@@ -74,9 +83,12 @@ config = Config(
         binarize=False,
         zygosity=True,
         min_allele_frequency=0.005,
-        max_allele_frequency=1.0,
+        max_allele_frequency=0.5,
         max_variants=None,
         filter="",
+        split_multiallelic=True,
+        pass_only=True,
+        exclude_regions_bed=None,  # e.g. GRCh38 segdup + LCR BED (UCSC genomicSuperDups / GIAB difficult regions)
     ),
     gtf=GTFConfig(
         path="../adhoc analysis/gencode.v46.chr_patch_hapl_scaff.annotation.gtf.gz",
@@ -101,6 +113,7 @@ config = Config(
                 label="case",
                 id_column="ExternalSampleId",
                 filter="`Subject Group`=='ALS Spectrum MND' & `pct_european`>=0.85",
+                subject_column="ExternalSubjectId",
                 strata_mapping={
                     "sex": "Sex Call",
                     # "age": "Age"  # Add if available
@@ -112,6 +125,7 @@ config = Config(
                 label="control",
                 id_column="ExternalSampleId",
                 filter="`Subject Group`=='Non-Neurological Control' & `pct_european`>=0.85",
+                subject_column="ExternalSubjectId",
                 strata_mapping={
                     "sex": "Sex Call",
                     # "age": "Age"  # Add if available
@@ -150,6 +164,7 @@ config = Config(
                 label="case",
                 id_column="ExternalSampleId",
                 filter="`Subject Group`=='ALS Spectrum MND' & `pct_european`<0.85",
+                subject_column="ExternalSubjectId",
                 strata_mapping={
                     "sex": "Sex Call",
                     # "age": "Age"  # Add if available

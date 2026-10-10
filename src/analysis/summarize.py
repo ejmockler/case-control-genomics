@@ -65,7 +65,7 @@ def map_feature_to_gene_symbol(feature_name: str) -> str:
         str: Comma-separated gene symbols or an error message.
     """
     try:
-        chromosome, position = feature_name.replace('chr', '').split(':')
+        chromosome, position = feature_name.replace('chr', '').split(':')[:2]
         pos = int(position)
         gene_data = query_ensembl(chromosome, pos)
         if gene_data:

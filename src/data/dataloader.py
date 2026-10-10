@@ -207,6 +207,12 @@ class SmallTableLoader(DataLoader):
             num_duplicates = duplicates.sum()
             self.logger.warning(f"Found {num_duplicates} duplicate index values. Dropping duplicates, keeping the first occurrence.")
             df = df[~duplicates]
+        # Keep one sample per individual, so the same person can't land in both train and test
+        if self.config.subject_column:
+            repeated = df[self.config.subject_column].notna() & df.duplicated(subset=self.config.subject_column, keep='first')
+            if repeated.any():
+                self.logger.warning(f"Found {repeated.sum()} additional samples from already-seen subjects in {self.config.name}. Keeping one sample per subject.")
+                df = df[~repeated]
         return df
     
     def _apply_filters(self, df: pd.DataFrame) -> pd.DataFrame:
