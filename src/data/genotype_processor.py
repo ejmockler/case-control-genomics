@@ -57,6 +57,8 @@ class GenotypeProcessor:
 
         # Drop variants failing VCF filters (e.g. VQSR) before anything else is computed
         if self.config.pass_only:
+            if mt.aggregate_rows(hl.agg.all(hl.is_missing(mt.filters) | (hl.len(mt.filters) == 0))):
+                self.logger.warning("No variant has a FILTER value set (callset was likely never VQSR/hard-filtered); pass_only removes nothing.")
             mt = mt.filter_rows(hl.is_missing(mt.filters) | (hl.len(mt.filters) == 0))
 
         # Drop variants in difficult regions (segmental duplications, low-complexity sequence)
@@ -96,6 +98,7 @@ class GenotypeProcessor:
             (mt.maf > 0) &                                            # Remove invariant variants
             (mt.locus.contig.matches(self._get_contig_pattern())) &   # Filter biologically useful contigs
             hl.all(lambda a: hl.len(a) == 1, mt.alleles) &            # Filter to only include SNPs
+            ~hl.any(lambda a: a == '*', mt.alleles) &                 # Exclude spanning-deletion alleles, which pass the length check
             (mt.maf >= self.config.min_allele_frequency) &            # Apply MAF filter
             (mt.maf <= self.config.max_allele_frequency) &            # Upper MAF filter
             (~mt.has_missing)                                         # Drop variants with any missing values
